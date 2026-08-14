@@ -1,0 +1,21 @@
+import JSZip from 'jszip';
+import { escapeXml } from './html';
+
+export type EpubImage = { href: string; bytes: Uint8Array; mediaType: string };
+export type NavPoint = { title: string; href: string; children?: NavPoint[] };
+export type EpubBook = { title: string; author: string; source: string; description?: string; publisher?: string; tags: string[]; chapters: { href: string; title: string; content: string }[]; images: EpubImage[]; cover?: string; navigation: NavPoint[]; stylesheet?: string };
+
+const nav = (points: NavPoint[]): string => `<ol>${points.map(point => `<li><a href="${escapeXml(point.href)}">${escapeXml(point.title)}</a>${point.children?.length ? nav(point.children) : ''}</li>`).join('')}</ol>`;
+
+export async function createEpub(book: EpubBook): Promise<Uint8Array> {
+  const zip = new JSZip(); const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`; const add = (name: string, content: string | Uint8Array, compression: 'STORE' | 'DEFLATE' = 'DEFLATE') => zip.file(name, content, { compression });
+  add('mimetype', 'application/epub+zip', 'STORE');
+  add('META-INF/container.xml', '<?xml version="1.0" encoding="UTF-8"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>');
+  const manifest = [`<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>`, `<item id="nav" href="toc.xhtml" media-type="application/xhtml+xml" properties="nav"/>`, ...book.chapters.map(item => `<item id="${escapeXml(item.href)}" href="${escapeXml(item.href)}" media-type="application/xhtml+xml"/>`), ...book.images.map(item => `<item id="${escapeXml(item.href.replace(/[\\/.]/g, '_'))}" href="${escapeXml(item.href)}" media-type="${item.mediaType}"${item.href === book.cover ? ' properties="cover-image"' : ''}/>`), ...(book.stylesheet ? ['<item id="style" href="styles/style.css" media-type="text/css"/>'] : [])].join('');
+  add('OEBPS/content.opf', `<?xml version="1.0" encoding="UTF-8"?><package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" unique-identifier="bookId" version="3.0"><metadata><dc:identifier id="bookId">${id}</dc:identifier><dc:language>zh-CN</dc:language><dc:title>${escapeXml(book.title)}</dc:title><dc:creator>${escapeXml(book.author)}</dc:creator><dc:source>${escapeXml(book.source)}</dc:source>${book.description ? `<dc:description>${escapeXml(book.description)}</dc:description>` : ''}${book.publisher ? `<dc:publisher>${escapeXml(book.publisher)}</dc:publisher>` : ''}${book.tags.map(tag => `<dc:subject>${escapeXml(tag)}</dc:subject>`).join('')}<meta property="dcterms:modified">${new Date().toISOString().replace(/\.\d+Z$/, 'Z')}</meta></metadata><manifest>${manifest}</manifest><spine toc="ncx">${book.chapters.map(item => `<itemref idref="${escapeXml(item.href)}"/>`).join('')}</spine></package>`);
+  add('OEBPS/toc.xhtml', `<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>目录</title></head><body><nav epub:type="toc"><h1>目录</h1>${nav(book.navigation)}</nav></body></html>`);
+  let order = 1; const ncx = (point: NavPoint, key: string): string => `<navPoint id="${key}" playOrder="${order++}"><navLabel><text>${escapeXml(point.title)}</text></navLabel><content src="${escapeXml(point.href)}"/>${point.children?.map((child, index) => ncx(child, `${key}-${index + 1}`)).join('') ?? ''}</navPoint>`;
+  add('OEBPS/toc.ncx', `<?xml version="1.0" encoding="UTF-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="${id}"/><meta name="dtb:depth" content="1"/></head><docTitle><text>${escapeXml(book.title)}</text></docTitle><navMap>${book.navigation.map((point, index) => ncx(point, `navPoint-${index + 1}`)).join('')}</navMap></ncx>`);
+  book.chapters.forEach(chapter => add(`OEBPS/${chapter.href}`, chapter.content)); book.images.forEach(image => add(`OEBPS/${image.href}`, image.bytes)); if (book.stylesheet) add('OEBPS/styles/style.css', book.stylesheet);
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+}
